@@ -1,17 +1,45 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowDownRight, ArrowRight, ArrowUpRight, Calendar, FileText, History, Sparkles } from "lucide-react";
+import {
+  ArrowDownRight,
+  ArrowRight,
+  ArrowUpRight,
+  Calendar,
+  FileText,
+  History,
+  Info,
+  Sparkles
+} from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDate, formatNumber, formatPercent } from "@/lib/utils";
-import { aggregateTopChannels, aggregateTopEvents, aggregateTopPages, type HistoricalBaseline } from "@/lib/historical";
+import {
+  aggregateTopChannels,
+  aggregateTopEvents,
+  aggregateTopPages,
+  type HistoricalBaseline
+} from "@/lib/historical";
 import type { SiteDashboard } from "@/lib/types";
 
 interface Props {
   dashboards: SiteDashboard[];
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function daysBetween(fromIso: string, toIso: string): number {
+  const a = new Date(`${fromIso}T00:00:00Z`).getTime();
+  const b = new Date(`${toIso}T00:00:00Z`).getTime();
+  return Math.max(1, Math.floor((b - a) / DAY_MS) + 1);
+}
+
+function monthLabel(yyyyMm: string): string {
+  const [y, m] = yyyyMm.split("-");
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[Number(m) - 1]} ${y}`;
 }
 
 export function CompareView({ dashboards }: Props) {
@@ -34,8 +62,8 @@ export function CompareView({ dashboards }: Props) {
             Pre-revamp vs post-revamp
           </CardTitle>
           <CardDescription>
-            Old analytics data is hardcoded from CSV snapshots of the previous Google Analytics property (no longer collecting).
-            Post-revamp data is live from the GA4 Data API.
+            Old analytics are hardcoded from CSV snapshots of the previous Google Analytics property.
+            Lift percentages are normalized to monthly rates so different window lengths compare fairly.
           </CardDescription>
         </CardHeader>
       </Card>
@@ -47,28 +75,66 @@ export function CompareView({ dashboards }: Props) {
   );
 }
 
+interface Totals {
+  activeUsers: number;
+  newUsers: number;
+  sessions: number;
+  pageViews: number;
+  eventCount: number;
+  keyEvents: number;
+}
+
+interface PostMonth {
+  month: string;
+  dayCount: number;
+  sessions: number;
+  users: number;
+  views: number;
+  events: number;
+  keyEvents: number;
+}
+
 function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
   const baseline = dashboard.historicalBaseline;
+  const launchDate = dashboard.comparison.launchDate;
 
-  // Post-revamp aggregate = sum across all "After revamp" weeks that have GA4 data.
-  const postRevamp = useMemo(() => {
-    const completed = dashboard.comparison.weeks.filter((w) => w.phase === "After revamp" && !w.isFuture);
-    const totals = completed.reduce(
-      (sum, w) => {
-        sum.activeUsers += w.metrics.activeUsers;
-        sum.newUsers += w.metrics.newUsers;
-        sum.sessions += w.metrics.sessions;
-        sum.pageViews += w.metrics.screenPageViews;
-        sum.eventCount += w.metrics.eventCount;
-        sum.keyEvents += w.metrics.keyEvents;
-        return sum;
+  // Post-revamp aggregate from daily trend (we already fetch up to 60 days).
+  // This is more accurate than using the launch-relative weekly buckets because it lets us
+  // bucket by calendar month.
+  const post = useMemo(() => {
+    const postDays = dashboard.trend.filter((p) => p.date >= launchDate);
+    const totals: Totals = postDays.reduce(
+      (acc, p) => {
+        acc.activeUsers += p.activeUsers;
+        acc.newUsers += 0;
+        acc.sessions += p.sessions;
+        acc.pageViews += p.screenPageViews;
+        acc.eventCount += p.eventCount;
+        acc.keyEvents += p.keyEvents;
+        return acc;
       },
       { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0, eventCount: 0, keyEvents: 0 }
     );
-    return { weeks: completed, totals };
-  }, [dashboard]);
 
-  const launchDate = dashboard.comparison.launchDate;
+    // Group post days into monthly buckets.
+    const byMonth = new Map<string, PostMonth>();
+    for (const p of postDays) {
+      const month = p.date.slice(0, 7);
+      const cur =
+        byMonth.get(month) ||
+        { month, dayCount: 0, sessions: 0, users: 0, views: 0, events: 0, keyEvents: 0 };
+      cur.dayCount += 1;
+      cur.sessions += p.sessions;
+      cur.users += p.activeUsers;
+      cur.views += p.screenPageViews;
+      cur.events += p.eventCount;
+      cur.keyEvents += p.keyEvents;
+      byMonth.set(month, cur);
+    }
+    const months = Array.from(byMonth.values()).sort((a, b) => a.month.localeCompare(b.month));
+
+    return { totals, dayCount: postDays.length, months };
+  }, [dashboard, launchDate]);
 
   return (
     <Card>
@@ -88,7 +154,7 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
             </Badge>
             <Badge variant="success" className="gap-1">
               <Sparkles className="h-3 w-3" />
-              New · since {formatDate(launchDate)}
+              New · {post.dayCount} day{post.dayCount === 1 ? "" : "s"} since launch
             </Badge>
           </div>
         </div>
@@ -97,18 +163,52 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
       <CardContent className="space-y-5">
         {baseline ? (
           <>
-            <MetricGrid baseline={baseline} postRevamp={postRevamp.totals} />
+            <NormalizationNote baseline={baseline} post={post} />
+            <MetricGrid baseline={baseline} post={post} />
+
             <Tabs defaultValue="breakdown">
               <TabsList>
                 <TabsTrigger value="breakdown">Metric breakdown</TabsTrigger>
+                <TabsTrigger value="monthly">Monthly view</TabsTrigger>
                 <TabsTrigger value="channels">Channels</TabsTrigger>
                 <TabsTrigger value="pages">Pages</TabsTrigger>
                 <TabsTrigger value="events">Events</TabsTrigger>
               </TabsList>
 
-              <TabsContent value="breakdown" className="space-y-3">
-                <MetricTable baseline={baseline} postRevamp={postRevamp.totals} />
-                <MonthlyTable baseline={baseline} />
+              <TabsContent value="breakdown">
+                <MetricTable baseline={baseline} post={post} />
+              </TabsContent>
+
+              <TabsContent value="monthly" className="space-y-3">
+                <MonthlyTable
+                  title="Pre-revamp · monthly (from CSVs)"
+                  rows={baseline.months.map((m) => ({
+                    label: m.label,
+                    sub: m.sourceFile,
+                    dayCount: daysBetween(m.from, m.to),
+                    sessions: m.totals.sessions,
+                    users: m.totals.activeUsers,
+                    views: m.totals.pageViews,
+                    events: m.totals.eventCount,
+                    keyEvents: m.totals.keyEvents,
+                    partial: false
+                  }))}
+                />
+                <MonthlyTable
+                  title="Post-revamp · monthly (live GA4)"
+                  rows={post.months.map((m) => ({
+                    label: monthLabel(m.month),
+                    sub: `${m.dayCount} day${m.dayCount === 1 ? "" : "s"} of data`,
+                    dayCount: m.dayCount,
+                    sessions: m.sessions,
+                    users: m.users,
+                    views: m.views,
+                    events: m.events,
+                    keyEvents: m.keyEvents,
+                    partial: m.dayCount < 28
+                  }))}
+                  emptyHint="No post-revamp daily data yet — check back after the launch."
+                />
               </TabsContent>
 
               <TabsContent value="channels">
@@ -137,13 +237,25 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
   );
 }
 
-interface Totals {
-  activeUsers: number;
-  newUsers: number;
-  sessions: number;
-  pageViews: number;
-  eventCount: number;
-  keyEvents: number;
+interface Post {
+  totals: Totals;
+  dayCount: number;
+  months: PostMonth[];
+}
+
+function NormalizationNote({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
+  const oldDays = daysBetween(baseline.dateRange.from, baseline.dateRange.to);
+  return (
+    <div className="flex items-start gap-2 rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+      <p>
+        Comparing <strong className="text-foreground">{oldDays} days</strong> of pre-revamp data against{" "}
+        <strong className="text-foreground">{post.dayCount} day{post.dayCount === 1 ? "" : "s"}</strong> of
+        post-revamp data. Lift percentages below are computed from <strong>monthly rates</strong> (total ÷ days × 30)
+        to keep the comparison fair.
+      </p>
+    </div>
+  );
 }
 
 function liftPercent(post: number, pre: number): number | null {
@@ -151,27 +263,50 @@ function liftPercent(post: number, pre: number): number | null {
   return ((post - pre) / pre) * 100;
 }
 
-function MetricGrid({ baseline, postRevamp }: { baseline: HistoricalBaseline; postRevamp: Totals }) {
-  const tiles: { label: string; pre: number; post: number; format?: "compact" }[] = [
-    { label: "Sessions", pre: baseline.totals.sessions, post: postRevamp.sessions },
-    { label: "Active users", pre: baseline.totals.activeUsers, post: postRevamp.activeUsers },
-    { label: "Page views", pre: baseline.totals.pageViews, post: postRevamp.pageViews },
-    { label: "Events", pre: baseline.totals.eventCount, post: postRevamp.eventCount },
-    { label: "Key events", pre: baseline.totals.keyEvents, post: postRevamp.keyEvents }
+function monthlyRate(total: number, dayCount: number): number {
+  if (!dayCount) return 0;
+  return (total * 30) / dayCount;
+}
+
+function MetricGrid({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
+  const oldDays = daysBetween(baseline.dateRange.from, baseline.dateRange.to);
+  const newDays = post.dayCount;
+
+  const tiles = [
+    { label: "Sessions", pre: baseline.totals.sessions, post: post.totals.sessions },
+    { label: "Active users", pre: baseline.totals.activeUsers, post: post.totals.activeUsers },
+    { label: "Page views", pre: baseline.totals.pageViews, post: post.totals.pageViews },
+    { label: "Events", pre: baseline.totals.eventCount, post: post.totals.eventCount },
+    { label: "Key events", pre: baseline.totals.keyEvents, post: post.totals.keyEvents }
   ];
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
       {tiles.map((tile) => (
-        <CompareTile key={tile.label} {...tile} />
+        <CompareTile key={tile.label} {...tile} oldDays={oldDays} newDays={newDays} />
       ))}
     </div>
   );
 }
 
-function CompareTile({ label, pre, post }: { label: string; pre: number; post: number }) {
-  const lift = liftPercent(post, pre);
-  const liftClass = lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
+function CompareTile({
+  label,
+  pre,
+  post,
+  oldDays,
+  newDays
+}: {
+  label: string;
+  pre: number;
+  post: number;
+  oldDays: number;
+  newDays: number;
+}) {
+  const preRate = monthlyRate(pre, oldDays);
+  const postRate = monthlyRate(post, newDays);
+  const lift = liftPercent(postRate, preRate);
+  const liftClass =
+    lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
   const Icon = lift === null || lift === 0 ? ArrowRight : lift > 0 ? ArrowUpRight : ArrowDownRight;
 
   return (
@@ -179,31 +314,41 @@ function CompareTile({ label, pre, post }: { label: string; pre: number; post: n
       <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Old</p>
-          <p className="text-lg font-semibold tabular-nums">{formatNumber(pre)}</p>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Old · per month</p>
+          <p className="text-lg font-semibold tabular-nums">{formatNumber(Math.round(preRate))}</p>
+          <p className="text-[10px] text-muted-foreground tabular-nums">
+            {formatNumber(pre)} total
+          </p>
         </div>
         <div>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">New</p>
-          <p className="text-lg font-semibold tabular-nums text-primary">{formatNumber(post)}</p>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">New · per month</p>
+          <p className="text-lg font-semibold tabular-nums text-primary">{formatNumber(Math.round(postRate))}</p>
+          <p className="text-[10px] text-muted-foreground tabular-nums">
+            {formatNumber(post)} total
+          </p>
         </div>
       </div>
       <div className={cn("mt-2 flex items-center gap-1 text-xs font-semibold", liftClass)}>
         <Icon className="h-3 w-3" />
         {lift === null ? "n/a" : formatPercent(lift)}
-        <span className="text-muted-foreground font-normal">{lift !== null && lift !== 0 ? "vs old" : ""}</span>
+        <span className="font-normal text-muted-foreground">
+          {lift !== null && lift !== 0 ? "monthly rate" : ""}
+        </span>
       </div>
     </div>
   );
 }
 
-function MetricTable({ baseline, postRevamp }: { baseline: HistoricalBaseline; postRevamp: Totals }) {
-  const rows: { label: string; pre: number; post: number }[] = [
-    { label: "Sessions", pre: baseline.totals.sessions, post: postRevamp.sessions },
-    { label: "Active users", pre: baseline.totals.activeUsers, post: postRevamp.activeUsers },
-    { label: "New users", pre: baseline.totals.newUsers, post: postRevamp.newUsers },
-    { label: "Page views", pre: baseline.totals.pageViews, post: postRevamp.pageViews },
-    { label: "Event count", pre: baseline.totals.eventCount, post: postRevamp.eventCount },
-    { label: "Key events", pre: baseline.totals.keyEvents, post: postRevamp.keyEvents }
+function MetricTable({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
+  const oldDays = daysBetween(baseline.dateRange.from, baseline.dateRange.to);
+  const newDays = post.dayCount;
+
+  const rows = [
+    { label: "Sessions", pre: baseline.totals.sessions, post: post.totals.sessions },
+    { label: "Active users", pre: baseline.totals.activeUsers, post: post.totals.activeUsers },
+    { label: "Page views", pre: baseline.totals.pageViews, post: post.totals.pageViews },
+    { label: "Event count", pre: baseline.totals.eventCount, post: post.totals.eventCount },
+    { label: "Key events", pre: baseline.totals.keyEvents, post: post.totals.keyEvents }
   ];
 
   return (
@@ -212,27 +357,37 @@ function MetricTable({ baseline, postRevamp }: { baseline: HistoricalBaseline; p
         <TableHeader>
           <TableRow>
             <TableHead className="pl-6">Metric</TableHead>
-            <TableHead className="text-right">Old site</TableHead>
-            <TableHead className="text-right">Revamped site</TableHead>
-            <TableHead className="pr-6 text-right">Change</TableHead>
+            <TableHead className="text-right">
+              Old total
+              <span className="ml-1 text-[9px] font-normal text-muted-foreground/70">({oldDays}d)</span>
+            </TableHead>
+            <TableHead className="text-right">
+              New total
+              <span className="ml-1 text-[9px] font-normal text-muted-foreground/70">({newDays}d)</span>
+            </TableHead>
+            <TableHead className="text-right">Old · /mo</TableHead>
+            <TableHead className="text-right">New · /mo</TableHead>
+            <TableHead className="pr-6 text-right">Change (monthly rate)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((row) => {
-            const lift = liftPercent(row.post, row.pre);
-            const delta = row.post - row.pre;
-            const liftClass = lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
+            const preRate = monthlyRate(row.pre, oldDays);
+            const postRate = monthlyRate(row.post, newDays);
+            const lift = liftPercent(postRate, preRate);
+            const liftClass =
+              lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
             return (
               <TableRow key={row.label}>
                 <TableCell className="pl-6 font-medium">{row.label}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatNumber(row.pre)}</TableCell>
                 <TableCell className="text-right tabular-nums font-semibold">{formatNumber(row.post)}</TableCell>
+                <TableCell className="text-right tabular-nums text-muted-foreground">
+                  {formatNumber(Math.round(preRate))}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{formatNumber(Math.round(postRate))}</TableCell>
                 <TableCell className={cn("pr-6 text-right tabular-nums font-semibold", liftClass)}>
                   {lift === null ? "n/a" : formatPercent(lift)}
-                  <span className="ml-2 text-[11px] font-normal text-muted-foreground">
-                    {delta > 0 ? "+" : ""}
-                    {formatNumber(delta)}
-                  </span>
                 </TableCell>
               </TableRow>
             );
@@ -243,41 +398,73 @@ function MetricTable({ baseline, postRevamp }: { baseline: HistoricalBaseline; p
   );
 }
 
-function MonthlyTable({ baseline }: { baseline: HistoricalBaseline }) {
+interface MonthlyRow {
+  label: string;
+  sub: string;
+  dayCount: number;
+  sessions: number;
+  users: number;
+  views: number;
+  events: number;
+  keyEvents: number;
+  partial: boolean;
+}
+
+function MonthlyTable({
+  title,
+  rows,
+  emptyHint
+}: {
+  title: string;
+  rows: MonthlyRow[];
+  emptyHint?: string;
+}) {
   return (
     <Card className="overflow-hidden border">
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm">
           <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-          Pre-revamp monthly breakdown
+          {title}
         </CardTitle>
-        <CardDescription>From CSV snapshots ({baseline.monthCount} {baseline.monthCount === 1 ? "month" : "months"})</CardDescription>
       </CardHeader>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="pl-6">Month</TableHead>
-            <TableHead className="text-right">Sessions</TableHead>
-            <TableHead className="text-right">Users</TableHead>
-            <TableHead className="text-right">Page views</TableHead>
-            <TableHead className="pr-6 text-right">Events</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {baseline.months.map((m) => (
-            <TableRow key={m.label}>
-              <TableCell className="pl-6">
-                <span className="font-medium">{m.label}</span>
-                <span className="ml-2 text-xs text-muted-foreground">{m.sourceFile}</span>
-              </TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(m.totals.sessions)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(m.totals.activeUsers)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(m.totals.pageViews)}</TableCell>
-              <TableCell className="pr-6 text-right tabular-nums">{formatNumber(m.totals.eventCount)}</TableCell>
+      {rows.length === 0 ? (
+        <div className="px-6 pb-5 text-xs text-muted-foreground">{emptyHint || "No data."}</div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="pl-6">Month</TableHead>
+              <TableHead className="text-right">Sessions</TableHead>
+              <TableHead className="text-right">Users</TableHead>
+              <TableHead className="text-right">Page views</TableHead>
+              <TableHead className="text-right">Events</TableHead>
+              <TableHead className="pr-6 text-right">Key events</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {rows.map((m) => (
+              <TableRow key={m.label}>
+                <TableCell className="pl-6">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{m.label}</span>
+                    {m.partial ? (
+                      <Badge variant="warning" className="text-[10px]">
+                        partial · {m.dayCount}d
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <span className="text-xs text-muted-foreground">{m.sub}</span>
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{formatNumber(m.sessions)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatNumber(m.users)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatNumber(m.views)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatNumber(m.events)}</TableCell>
+                <TableCell className="pr-6 text-right tabular-nums">{formatNumber(m.keyEvents)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </Card>
   );
 }
@@ -387,6 +574,8 @@ function SideBySideList({
 }
 
 function RankRows({ items, unitLabel, accent }: { items: SideItem[]; unitLabel: string; accent: string }) {
+  const showAll = useCollapsibleList(items.length, 8);
+
   if (!items.length) {
     return (
       <div className="grid place-items-center rounded-lg border border-dashed bg-muted/30 p-6 text-center text-xs text-muted-foreground">
@@ -397,7 +586,6 @@ function RankRows({ items, unitLabel, accent }: { items: SideItem[]; unitLabel: 
   }
 
   const max = Math.max(1, ...items.map((i) => i.value));
-  const showAll = useCollapsibleList(items.length, 8);
 
   return (
     <div className="space-y-2">
@@ -432,7 +620,6 @@ function RankRows({ items, unitLabel, accent }: { items: SideItem[]; unitLabel: 
   );
 }
 
-// Tiny helper so the side-by-side list can be collapsible without extra deps.
 function useCollapsibleList(total: number, initial: number) {
   const [count, setCount] = useState(Math.min(initial, total));
   return {
