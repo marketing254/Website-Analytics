@@ -214,7 +214,9 @@ async function fetchServiceAccountAccessToken(): Promise<string> {
 }
 
 async function fetchAccessToken(): Promise<string> {
-  if (process.env.GOOGLE_OAUTH_CLIENT) return fetchOAuthAccessToken();
+  if (process.env.GOOGLE_OAUTH_CLIENT_JSON || process.env.GOOGLE_OAUTH_CLIENT) {
+    return fetchOAuthAccessToken();
+  }
   return fetchServiceAccountAccessToken();
 }
 
@@ -316,7 +318,7 @@ export function mapDimensionRow(row: Ga4Row, dimHeaders: Ga4Header[], metricHead
 }
 
 export function authMode(): "oauth" | "service-account" | "unconfigured" {
-  if (process.env.GOOGLE_OAUTH_CLIENT) return "oauth";
+  if (process.env.GOOGLE_OAUTH_CLIENT_JSON || process.env.GOOGLE_OAUTH_CLIENT) return "oauth";
   if (process.env.GOOGLE_APPLICATION_CREDENTIALS) return "service-account";
   return "unconfigured";
 }
