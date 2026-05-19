@@ -94,29 +94,52 @@ interface PostMonth {
   keyEvents: number;
 }
 
+interface Outlier {
+  date: string;
+  sessions: number;
+  ratio: number;
+}
+
+function detectOutliers(post: Array<{ date: string; sessions: number }>) {
+  if (post.length < 4) return { outliers: [] as Outlier[], threshold: 0, median: 0 };
+  const sorted = [...post.map((p) => p.sessions)].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] || 0;
+  const threshold = Math.max(median * 10, 100);
+  const outliers: Outlier[] = post
+    .filter((p) => p.sessions > threshold && p.sessions > 50)
+    .map((p) => ({ date: p.date, sessions: p.sessions, ratio: median ? p.sessions / median : 0 }));
+  return { outliers, threshold, median };
+}
+
 function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
   const baseline = dashboard.historicalBaseline;
   const launchDate = dashboard.comparison.launchDate;
 
   // Post-revamp aggregate from daily trend (we already fetch up to 60 days).
-  // This is more accurate than using the launch-relative weekly buckets because it lets us
-  // bucket by calendar month.
   const post = useMemo(() => {
     const postDays = dashboard.trend.filter((p) => p.date >= launchDate);
-    const totals: Totals = postDays.reduce(
-      (acc, p) => {
-        acc.activeUsers += p.activeUsers;
-        acc.newUsers += 0;
-        acc.sessions += p.sessions;
-        acc.pageViews += p.screenPageViews;
-        acc.eventCount += p.eventCount;
-        acc.keyEvents += p.keyEvents;
-        return acc;
-      },
-      { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0, eventCount: 0, keyEvents: 0 }
-    );
+    const { outliers } = detectOutliers(postDays);
+    const outlierDates = new Set(outliers.map((o) => o.date));
 
-    // Group post days into monthly buckets.
+    const sumDays = (days: typeof postDays): Totals =>
+      days.reduce(
+        (acc, p) => {
+          acc.activeUsers += p.activeUsers;
+          acc.newUsers += 0;
+          acc.sessions += p.sessions;
+          acc.pageViews += p.screenPageViews;
+          acc.eventCount += p.eventCount;
+          acc.keyEvents += p.keyEvents;
+          return acc;
+        },
+        { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0, eventCount: 0, keyEvents: 0 }
+      );
+
+    const totals = sumDays(postDays);
+    const cleanDays = postDays.filter((p) => !outlierDates.has(p.date));
+    const cleanTotals = sumDays(cleanDays);
+
+    // Group all post days into monthly buckets (including outliers — we'll mark them in the UI).
     const byMonth = new Map<string, PostMonth>();
     for (const p of postDays) {
       const month = p.date.slice(0, 7);
@@ -133,7 +156,14 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
     }
     const months = Array.from(byMonth.values()).sort((a, b) => a.month.localeCompare(b.month));
 
-    return { totals, dayCount: postDays.length, months };
+    return {
+      totals,
+      cleanTotals,
+      dayCount: postDays.length,
+      cleanDayCount: cleanDays.length,
+      months,
+      outliers
+    };
   }, [dashboard, launchDate]);
 
   return (
@@ -164,6 +194,7 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
         {baseline ? (
           <>
             <NormalizationNote baseline={baseline} post={post} />
+            <OutlierBanner outliers={post.outliers} />
             <MetricGrid baseline={baseline} post={post} />
 
             <Tabs defaultValue="breakdown">
@@ -196,17 +227,22 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
                 />
                 <MonthlyTable
                   title="Post-revamp · monthly (live GA4)"
-                  rows={post.months.map((m) => ({
-                    label: monthLabel(m.month),
-                    sub: `${m.dayCount} day${m.dayCount === 1 ? "" : "s"} of data`,
-                    dayCount: m.dayCount,
-                    sessions: m.sessions,
-                    users: m.users,
-                    views: m.views,
-                    events: m.events,
-                    keyEvents: m.keyEvents,
-                    partial: m.dayCount < 28
-                  }))}
+                  rows={post.months.map((m) => {
+                    const monthOutliers = post.outliers.filter((o) => o.date.startsWith(m.month));
+                    const subParts = [`${m.dayCount} day${m.dayCount === 1 ? "" : "s"}`];
+                    if (monthOutliers.length) subParts.push(`includes ${monthOutliers.length} anomalous day`);
+                    return {
+                      label: monthLabel(m.month),
+                      sub: subParts.join(" · "),
+                      dayCount: m.dayCount,
+                      sessions: m.sessions,
+                      users: m.users,
+                      views: m.views,
+                      events: m.events,
+                      keyEvents: m.keyEvents,
+                      partial: m.dayCount < 28
+                    };
+                  })}
                   emptyHint="No post-revamp daily data yet — check back after the launch."
                 />
               </TabsContent>
@@ -239,8 +275,11 @@ function SiteRevampCompare({ dashboard }: { dashboard: SiteDashboard }) {
 
 interface Post {
   totals: Totals;
+  cleanTotals: Totals;
   dayCount: number;
+  cleanDayCount: number;
   months: PostMonth[];
+  outliers: Outlier[];
 }
 
 function NormalizationNote({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
@@ -253,7 +292,43 @@ function NormalizationNote({ baseline, post }: { baseline: HistoricalBaseline; p
         <strong className="text-foreground">{post.dayCount} day{post.dayCount === 1 ? "" : "s"}</strong>.
         Totals shown are <strong>actual GA4 counts</strong>. The lift % comes from comparing{" "}
         <strong>daily averages</strong> (total ÷ days), not projections.
+        {post.outliers.length > 0 ? (
+          <>
+            {" "}
+            <strong className="text-warning">
+              {post.outliers.length} anomalous day{post.outliers.length === 1 ? "" : "s"} excluded
+            </strong>{" "}
+            from the daily-average calculation (likely bot/spam traffic).
+          </>
+        ) : null}
       </p>
+    </div>
+  );
+}
+
+function OutlierBanner({ outliers }: { outliers: Outlier[] }) {
+  if (!outliers.length) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-foreground">
+      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+      <div className="space-y-1">
+        <p className="font-semibold">Anomalous traffic detected — excluded from averages</p>
+        <p className="text-muted-foreground">
+          {outliers.length === 1
+            ? "This day's traffic is more than 10× the median for the post-launch period — almost certainly bot activity or a one-time campaign spike. It's excluded from the daily-average comparison below, but still counted in the raw totals."
+            : "These days had traffic more than 10× the median — likely bot or one-off campaign. Excluded from daily averages."}
+        </p>
+        <ul className="mt-1 space-y-0.5 font-mono text-[11px]">
+          {outliers.map((o) => (
+            <li key={o.date}>
+              <span className="text-foreground">{o.date}</span>
+              <span className="text-muted-foreground">
+                {" "}· {formatNumber(o.sessions)} sessions ({o.ratio.toFixed(0)}× median)
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }
@@ -276,20 +351,31 @@ function formatRate(value: number): string {
 
 function MetricGrid({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
   const oldDays = daysBetween(baseline.dateRange.from, baseline.dateRange.to);
-  const newDays = post.dayCount;
+  const newDays = post.cleanDayCount;
 
+  // Use cleanTotals (outlier-excluded) for the comparison. The display totals are also clean
+  // so the daily-avg arithmetic stays consistent.
   const tiles = [
-    { label: "Sessions", pre: baseline.totals.sessions, post: post.totals.sessions },
-    { label: "Active users", pre: baseline.totals.activeUsers, post: post.totals.activeUsers },
-    { label: "Page views", pre: baseline.totals.pageViews, post: post.totals.pageViews },
-    { label: "Events", pre: baseline.totals.eventCount, post: post.totals.eventCount },
-    { label: "Key events", pre: baseline.totals.keyEvents, post: post.totals.keyEvents }
+    { label: "Sessions", pre: baseline.totals.sessions, post: post.cleanTotals.sessions, raw: post.totals.sessions },
+    { label: "Active users", pre: baseline.totals.activeUsers, post: post.cleanTotals.activeUsers, raw: post.totals.activeUsers },
+    { label: "Page views", pre: baseline.totals.pageViews, post: post.cleanTotals.pageViews, raw: post.totals.pageViews },
+    { label: "Events", pre: baseline.totals.eventCount, post: post.cleanTotals.eventCount, raw: post.totals.eventCount },
+    { label: "Key events", pre: baseline.totals.keyEvents, post: post.cleanTotals.keyEvents, raw: post.totals.keyEvents }
   ];
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
       {tiles.map((tile) => (
-        <CompareTile key={tile.label} {...tile} oldDays={oldDays} newDays={newDays} />
+        <CompareTile
+          key={tile.label}
+          label={tile.label}
+          pre={tile.pre}
+          post={tile.post}
+          rawPost={tile.raw}
+          oldDays={oldDays}
+          newDays={newDays}
+          hasOutliers={post.outliers.length > 0}
+        />
       ))}
     </div>
   );
@@ -299,14 +385,18 @@ function CompareTile({
   label,
   pre,
   post,
+  rawPost,
   oldDays,
-  newDays
+  newDays,
+  hasOutliers
 }: {
   label: string;
   pre: number;
   post: number;
+  rawPost: number;
   oldDays: number;
   newDays: number;
+  hasOutliers: boolean;
 }) {
   const preAvg = dailyAverage(pre, oldDays);
   const postAvg = dailyAverage(post, newDays);
@@ -314,6 +404,7 @@ function CompareTile({
   const liftClass =
     lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
   const Icon = lift === null || lift === 0 ? ArrowRight : lift > 0 ? ArrowUpRight : ArrowDownRight;
+  const excludedDelta = rawPost - post;
 
   return (
     <div className="rounded-xl border bg-card p-4">
@@ -325,9 +416,17 @@ function CompareTile({
           <p className="text-[10px] text-muted-foreground tabular-nums">{formatRate(preAvg)} / day</p>
         </div>
         <div>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">New · {newDays}d</p>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            New · {newDays}d
+            {hasOutliers ? <span className="ml-1 text-warning">clean</span> : null}
+          </p>
           <p className="text-lg font-semibold tabular-nums text-primary">{formatNumber(post)}</p>
           <p className="text-[10px] text-muted-foreground tabular-nums">{formatRate(postAvg)} / day</p>
+          {hasOutliers && excludedDelta > 0 ? (
+            <p className="text-[10px] text-muted-foreground tabular-nums" title="Raw total including anomalous days">
+              raw: {formatNumber(rawPost)}
+            </p>
+          ) : null}
         </div>
       </div>
       <div className={cn("mt-2 flex items-center gap-1 text-xs font-semibold", liftClass)}>
@@ -343,14 +442,14 @@ function CompareTile({
 
 function MetricTable({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
   const oldDays = daysBetween(baseline.dateRange.from, baseline.dateRange.to);
-  const newDays = post.dayCount;
+  const newDays = post.cleanDayCount;
 
   const rows = [
-    { label: "Sessions", pre: baseline.totals.sessions, post: post.totals.sessions },
-    { label: "Active users", pre: baseline.totals.activeUsers, post: post.totals.activeUsers },
-    { label: "Page views", pre: baseline.totals.pageViews, post: post.totals.pageViews },
-    { label: "Event count", pre: baseline.totals.eventCount, post: post.totals.eventCount },
-    { label: "Key events", pre: baseline.totals.keyEvents, post: post.totals.keyEvents }
+    { label: "Sessions", pre: baseline.totals.sessions, post: post.cleanTotals.sessions },
+    { label: "Active users", pre: baseline.totals.activeUsers, post: post.cleanTotals.activeUsers },
+    { label: "Page views", pre: baseline.totals.pageViews, post: post.cleanTotals.pageViews },
+    { label: "Event count", pre: baseline.totals.eventCount, post: post.cleanTotals.eventCount },
+    { label: "Key events", pre: baseline.totals.keyEvents, post: post.cleanTotals.keyEvents }
   ];
 
   return (
