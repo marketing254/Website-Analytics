@@ -249,10 +249,10 @@ function NormalizationNote({ baseline, post }: { baseline: HistoricalBaseline; p
     <div className="flex items-start gap-2 rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
       <p>
-        Comparing <strong className="text-foreground">{oldDays} days</strong> of pre-revamp data against{" "}
-        <strong className="text-foreground">{post.dayCount} day{post.dayCount === 1 ? "" : "s"}</strong> of
-        post-revamp data. Lift percentages below are computed from <strong>monthly rates</strong> (total ÷ days × 30)
-        to keep the comparison fair.
+        Pre-revamp window: <strong className="text-foreground">{oldDays} days</strong>. Post-revamp window:{" "}
+        <strong className="text-foreground">{post.dayCount} day{post.dayCount === 1 ? "" : "s"}</strong>.
+        Totals shown are <strong>actual GA4 counts</strong>. The lift % comes from comparing{" "}
+        <strong>daily averages</strong> (total ÷ days), not projections.
       </p>
     </div>
   );
@@ -263,9 +263,15 @@ function liftPercent(post: number, pre: number): number | null {
   return ((post - pre) / pre) * 100;
 }
 
-function monthlyRate(total: number, dayCount: number): number {
+function dailyAverage(total: number, dayCount: number): number {
   if (!dayCount) return 0;
-  return (total * 30) / dayCount;
+  return total / dayCount;
+}
+
+function formatRate(value: number): string {
+  if (value === 0) return "0";
+  if (value < 10) return value.toFixed(1);
+  return formatNumber(Math.round(value));
 }
 
 function MetricGrid({ baseline, post }: { baseline: HistoricalBaseline; post: Post }) {
@@ -302,9 +308,9 @@ function CompareTile({
   oldDays: number;
   newDays: number;
 }) {
-  const preRate = monthlyRate(pre, oldDays);
-  const postRate = monthlyRate(post, newDays);
-  const lift = liftPercent(postRate, preRate);
+  const preAvg = dailyAverage(pre, oldDays);
+  const postAvg = dailyAverage(post, newDays);
+  const lift = liftPercent(postAvg, preAvg);
   const liftClass =
     lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
   const Icon = lift === null || lift === 0 ? ArrowRight : lift > 0 ? ArrowUpRight : ArrowDownRight;
@@ -314,25 +320,21 @@ function CompareTile({
       <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</p>
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Old · per month</p>
-          <p className="text-lg font-semibold tabular-nums">{formatNumber(Math.round(preRate))}</p>
-          <p className="text-[10px] text-muted-foreground tabular-nums">
-            {formatNumber(pre)} total
-          </p>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Old · {oldDays}d</p>
+          <p className="text-lg font-semibold tabular-nums">{formatNumber(pre)}</p>
+          <p className="text-[10px] text-muted-foreground tabular-nums">{formatRate(preAvg)} / day</p>
         </div>
         <div>
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">New · per month</p>
-          <p className="text-lg font-semibold tabular-nums text-primary">{formatNumber(Math.round(postRate))}</p>
-          <p className="text-[10px] text-muted-foreground tabular-nums">
-            {formatNumber(post)} total
-          </p>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">New · {newDays}d</p>
+          <p className="text-lg font-semibold tabular-nums text-primary">{formatNumber(post)}</p>
+          <p className="text-[10px] text-muted-foreground tabular-nums">{formatRate(postAvg)} / day</p>
         </div>
       </div>
       <div className={cn("mt-2 flex items-center gap-1 text-xs font-semibold", liftClass)}>
         <Icon className="h-3 w-3" />
         {lift === null ? "n/a" : formatPercent(lift)}
         <span className="font-normal text-muted-foreground">
-          {lift !== null && lift !== 0 ? "monthly rate" : ""}
+          {lift !== null && lift !== 0 ? "daily avg" : ""}
         </span>
       </div>
     </div>
@@ -365,16 +367,16 @@ function MetricTable({ baseline, post }: { baseline: HistoricalBaseline; post: P
               New total
               <span className="ml-1 text-[9px] font-normal text-muted-foreground/70">({newDays}d)</span>
             </TableHead>
-            <TableHead className="text-right">Old · /mo</TableHead>
-            <TableHead className="text-right">New · /mo</TableHead>
-            <TableHead className="pr-6 text-right">Change (monthly rate)</TableHead>
+            <TableHead className="text-right">Old · /day</TableHead>
+            <TableHead className="text-right">New · /day</TableHead>
+            <TableHead className="pr-6 text-right">Change (daily avg)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((row) => {
-            const preRate = monthlyRate(row.pre, oldDays);
-            const postRate = monthlyRate(row.post, newDays);
-            const lift = liftPercent(postRate, preRate);
+            const preAvg = dailyAverage(row.pre, oldDays);
+            const postAvg = dailyAverage(row.post, newDays);
+            const lift = liftPercent(postAvg, preAvg);
             const liftClass =
               lift === null || lift === 0 ? "text-muted-foreground" : lift > 0 ? "text-success" : "text-destructive";
             return (
@@ -383,9 +385,9 @@ function MetricTable({ baseline, post }: { baseline: HistoricalBaseline; post: P
                 <TableCell className="text-right tabular-nums">{formatNumber(row.pre)}</TableCell>
                 <TableCell className="text-right tabular-nums font-semibold">{formatNumber(row.post)}</TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">
-                  {formatNumber(Math.round(preRate))}
+                  {formatRate(preAvg)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums">{formatNumber(Math.round(postRate))}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatRate(postAvg)}</TableCell>
                 <TableCell className={cn("pr-6 text-right tabular-nums font-semibold", liftClass)}>
                   {lift === null ? "n/a" : formatPercent(lift)}
                 </TableCell>
