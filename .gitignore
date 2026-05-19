@@ -1,0 +1,19 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+.env
+.env.local
+.env.*.local
+credentials/
+config/sites.json
+
+# Raw GA4 CSV exports — historical data is baked into data/historical-baselines.ts
+*.csv
+
+*.log
+.DS_Store
+*.tsbuildinfo
+.vercel

@@ -1,0 +1,23 @@
+{
+  "timezone": "Asia/Colombo",
+  "sites": [
+    {
+      "id": "reduce-insurance-dependency",
+      "name": "Reduce Insurance Dependency",
+      "domain": "reduceinsurancedependency.com",
+      "propertyId": "535334332",
+      "launchDate": "2025-05-30",
+      "baselineWeeks": 4,
+      "postLaunchWeeks": 8
+    },
+    {
+      "id": "dominate-law",
+      "name": "Dominate Law",
+      "domain": "dominatelaw.com",
+      "propertyId": "530885750",
+      "launchDate": "2026-04-01",
+      "baselineWeeks": 4,
+      "postLaunchWeeks": 8
+    }
+  ]
+}
